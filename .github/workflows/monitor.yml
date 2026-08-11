@@ -1,8 +1,8 @@
 name: HKID Appointment Monitor
 
 on:
-  # 不再使用 GitHub 自己的 schedule
-  # 由 Cloudflare 每 5 分钟调用这个按钮
+  # 不再使用 GitHub 自带 schedule
+  # 定时任务完全交给 Cloudflare
   workflow_dispatch:
 
 permissions:
@@ -15,9 +15,11 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+
     timeout-minutes: 2
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v5
         with:
@@ -30,7 +32,11 @@ jobs:
 
       - name: Check quota
         env:
+
+          # 只监测到 2026-09-30
           END_DATE: "2026-09-30"
+
+          # 留空 = 全部六个办事处
           OFFICES: ""
 
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -44,17 +50,28 @@ jobs:
 
       - name: Save monitor state
         shell: bash
+
         run: |
+
           if git diff --quiet -- state.json; then
-            echo "state.json 没有变化，无需提交。"
+            echo "预约状态没有变化。"
+            echo "state.json 没有变化。"
+            echo "本轮不产生 Git commit。"
             exit 0
           fi
 
+          echo "预约状态发生变化，保存 state.json。"
+
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git config user.email \
+          "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add state.json
-          git commit -m "chore: update HKID monitor state"
+
+          git commit \
+          -m "chore: update HKID appointment state"
 
           git pull --rebase
+
           git push
