@@ -7,13 +7,15 @@
 功能：
 1. 查询香港入境处预约配额
 2. 监测全部 6 个人事登记办事处
-3. 从今天开始监测
+3. 从当天开始监测
 4. 固定截止到 2026-09-30
-5. 发现“有名额”或“少量名额”时发送 QQ 邮件
-6. 同一个名额持续存在时不会重复提醒
-7. 名额消失后重新出现，会再次提醒
-8. 支持 --test-email 测试邮箱
-9. 不自动预约、不填写个人资料、不绕过验证码
+5. quota-g / quota-y 视为可预约
+6. 新名额出现时发送 QQ 邮件
+7. 同一名额持续存在不会重复提醒
+8. 名额消失后再次出现会重新提醒
+9. 每轮在 GitHub 日志打印所有当前可预约名额
+10. 只有名额状态变化时才更新 state.json
+11. 不自动预约、不填写个人资料、不绕过验证码
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ from pathlib import Path
 
 
 # ============================================================
-# 官方页面 / 查询接口
+# 香港入境处查询
 # ============================================================
 
 API_URL = (
@@ -51,21 +53,18 @@ BOOKING_URL = "https://www.gov.hk/icbooking"
 
 
 # ============================================================
-# 时间设置
+# 时间
 # ============================================================
 
-# 香港时间 UTC+8
 HKT = timezone(timedelta(hours=8))
 
-# 默认截止日期
 DEFAULT_END_DATE = "2026-09-30"
 
-# 保存上一轮已有名额
 STATE_FILE = Path("state.json")
 
 
 # ============================================================
-# 人事登记办事处
+# 办事处
 # ============================================================
 
 OFFICE_NAMES = {
@@ -101,10 +100,11 @@ AVAILABLE_STATUSES = set(STATUS_NAMES.keys())
 
 
 # ============================================================
-# 读取 GitHub Actions 环境变量
+# 环境变量
 # ============================================================
 
 def env(name: str, default: str = "") -> str:
+
     value = os.environ.get(name, default)
 
     if value is None:
@@ -114,7 +114,7 @@ def env(name: str, default: str = "") -> str:
 
 
 # ============================================================
-# 查询预约配额
+# 查询入境处
 # ============================================================
 
 def fetch_quota() -> dict:
@@ -164,8 +164,8 @@ def fetch_quota() -> dict:
 
     except json.JSONDecodeError as exc:
         raise RuntimeError(
-            "香港入境处查询接口返回内容不是有效 JSON，"
-            "网页或接口可能发生变化。"
+            "香港入境处返回内容不是有效 JSON，"
+            "接口可能发生变化。"
         ) from exc
 
     if not isinstance(payload, dict):
@@ -175,44 +175,45 @@ def fetch_quota() -> dict:
 
     if not isinstance(payload.get("data"), list):
         raise RuntimeError(
-            "查询接口结构发生变化：找不到 data[]。"
+            "香港入境处查询接口结构发生变化：找不到 data[]。"
         )
 
     return payload
 
 
 # ============================================================
-# 解析截止日期
+# 截止日期
 # ============================================================
 
 def parse_end_date():
-    end_date_text = env(
+
+    text = env(
         "END_DATE",
         DEFAULT_END_DATE,
     )
 
     try:
         return datetime.strptime(
-            end_date_text,
+            text,
             "%Y-%m-%d",
         ).date()
 
     except ValueError as exc:
         raise RuntimeError(
-            "END_DATE 格式错误。"
-            "正确格式例如：2026-09-30"
+            "END_DATE 格式错误，应为 YYYY-MM-DD，"
+            "例如 2026-09-30。"
         ) from exc
 
 
 # ============================================================
-# 解析需要监控的办事处
+# 办事处选择
 # ============================================================
 
 def parse_office_filter() -> set[str]:
 
     raw = env("OFFICES", "")
 
-    # 留空 = 全部 6 个办事处
+    # 留空 = 全部六个办事处
     if not raw:
         return set(OFFICE_NAMES.keys())
 
@@ -222,14 +223,11 @@ def parse_office_filter() -> set[str]:
         if item.strip()
     }
 
-    invalid = (
-        requested
-        - set(OFFICE_NAMES.keys())
-    )
+    invalid = requested - set(OFFICE_NAMES.keys())
 
     if invalid:
         raise RuntimeError(
-            "OFFICES 中存在未知办事处代码："
+            "OFFICES 中存在未知办事处："
             + ", ".join(sorted(invalid))
         )
 
@@ -237,7 +235,7 @@ def parse_office_filter() -> set[str]:
 
 
 # ============================================================
-# 提取截止日期之前的可预约名额
+# 提取当前可预约名额
 # ============================================================
 
 def extract_available(
@@ -253,6 +251,7 @@ def extract_available(
     for row in payload["data"]:
 
         try:
+
             office_id = str(
                 row["officeId"]
             ).strip().upper()
@@ -269,19 +268,10 @@ def extract_available(
         ):
             continue
 
-        # 只检查指定办事处
         if office_id not in offices:
             continue
 
-        # ====================================================
-        # 最重要的日期条件
-        #
-        # 从今天开始
-        # 到 2026-09-30 为止
-        #
-        # 10 月 1 日及以后完全忽略
-        # ====================================================
-
+        # 今天至 2026-09-30
         if not (
             today
             <= appointment_date
@@ -289,8 +279,6 @@ def extract_available(
         ):
             continue
 
-        # R = 一般服务时段
-        # K = 延长服务时段
         session_fields = (
             ("R", "quotaR"),
             ("K", "quotaK"),
@@ -305,43 +293,33 @@ def extract_available(
                 )
             ).strip()
 
-            # 只把这两种情况认定为有号：
-            #
-            # quota-g = 有名额
-            # quota-y = 少量名额
             if status not in AVAILABLE_STATUSES:
                 continue
 
-            result = {
-                "key": (
-                    f"{office_id}|"
-                    f"{appointment_date.isoformat()}|"
-                    f"{session_key}"
-                ),
-
-                "office_id": office_id,
-
-                "office": OFFICE_NAMES.get(
-                    office_id,
-                    office_id,
-                ),
-
-                "date": appointment_date.isoformat(),
-
-                "session": SESSION_NAMES.get(
-                    session_key,
-                    session_key,
-                ),
-
-                "status": STATUS_NAMES.get(
-                    status,
-                    status,
-                ),
-
-                "status_raw": status,
-            }
-
-            results.append(result)
+            results.append(
+                {
+                    "key": (
+                        f"{office_id}|"
+                        f"{appointment_date.isoformat()}|"
+                        f"{session_key}"
+                    ),
+                    "office_id": office_id,
+                    "office": OFFICE_NAMES.get(
+                        office_id,
+                        office_id,
+                    ),
+                    "date": appointment_date.isoformat(),
+                    "session": SESSION_NAMES.get(
+                        session_key,
+                        session_key,
+                    ),
+                    "status": STATUS_NAMES.get(
+                        status,
+                        status,
+                    ),
+                    "status_raw": status,
+                }
+            )
 
     results.sort(
         key=lambda item: (
@@ -355,7 +333,7 @@ def extract_available(
 
 
 # ============================================================
-# 读取上一轮已经存在的名额
+# 读取 state.json
 # ============================================================
 
 def load_previous_keys() -> set[str]:
@@ -390,24 +368,30 @@ def load_previous_keys() -> set[str]:
 
 
 # ============================================================
-# 保存本轮名额
+# 只有状态变化时保存 state.json
 # ============================================================
 
-def save_state(
+def save_state_if_changed(
+    previous_keys: set[str],
     current_keys: set[str],
     source_update_time: str,
-) -> None:
+) -> bool:
+
+    if previous_keys == current_keys:
+
+        print(
+            "预约状态没有变化，"
+            "state.json 不更新。"
+        )
+
+        return False
 
     data = {
         "available_keys": sorted(
             current_keys
         ),
-
-        "source_update_time": (
-            source_update_time
-        ),
-
-        "checked_at_hkt": (
+        "source_update_time": source_update_time,
+        "state_changed_at_hkt": (
             datetime.now(HKT)
             .isoformat(timespec="seconds")
         ),
@@ -422,9 +406,16 @@ def save_state(
         encoding="utf-8",
     )
 
+    print(
+        "预约状态发生变化，"
+        "state.json 已更新。"
+    )
+
+    return True
+
 
 # ============================================================
-# QQ 邮箱 SMTP 配置
+# SMTP 配置
 # ============================================================
 
 def smtp_settings() -> dict:
@@ -439,29 +430,24 @@ def smtp_settings() -> dict:
 
     except ValueError as exc:
         raise RuntimeError(
-            "SMTP_PORT 必须是数字，例如 465。"
+            "SMTP_PORT 必须是数字。"
         ) from exc
 
     settings = {
         "host": env(
             "SMTP_HOST"
         ),
-
         "port": port,
-
         "mode": env(
             "SMTP_MODE",
             "ssl",
         ).lower(),
-
         "user": env(
             "SMTP_USER"
         ),
-
         "password": env(
             "SMTP_PASS"
         ),
-
         "to": env(
             "TO_EMAIL"
         ),
@@ -489,14 +475,14 @@ def smtp_settings() -> dict:
         "starttls",
     }:
         raise RuntimeError(
-            "SMTP_MODE 只能填写 ssl 或 starttls。"
+            "SMTP_MODE 只能是 ssl 或 starttls。"
         )
 
     return settings
 
 
 # ============================================================
-# 清理邮件 Header
+# 邮件字段清理
 # ============================================================
 
 def clean_header(value: str) -> str:
@@ -517,7 +503,7 @@ def clean_email_address(value: str) -> str:
 
 
 # ============================================================
-# 发送 QQ 邮件
+# 发邮件
 # ============================================================
 
 def send_email(
@@ -553,15 +539,6 @@ def send_email(
         subject
     )
 
-    # --------------------------------------------------------
-    # 基础检查
-    # --------------------------------------------------------
-
-    if not smtp_host:
-        raise RuntimeError(
-            "SMTP_HOST 为空。"
-        )
-
     if (
         not smtp_user
         or "@" not in smtp_user
@@ -578,21 +555,10 @@ def send_email(
             "TO_EMAIL 格式不正确。"
         )
 
-    if not smtp_password:
-        raise RuntimeError(
-            "SMTP_PASS 为空。"
-        )
-
-    # --------------------------------------------------------
-    # 构造邮件
-    # --------------------------------------------------------
-
     message = EmailMessage()
 
     message["Subject"] = subject
-
     message["From"] = smtp_user
-
     message["To"] = to_email
 
     message.set_content(
@@ -601,10 +567,6 @@ def send_email(
     )
 
     context = ssl.create_default_context()
-
-    # --------------------------------------------------------
-    # QQ 邮箱 SSL
-    # --------------------------------------------------------
 
     try:
 
@@ -625,10 +587,6 @@ def send_email(
                 smtp.send_message(
                     message
                 )
-
-        # ----------------------------------------------------
-        # STARTTLS
-        # ----------------------------------------------------
 
         elif smtp_mode == "starttls":
 
@@ -658,41 +616,34 @@ def send_email(
         else:
 
             raise RuntimeError(
-                f"不支持的 SMTP_MODE：{smtp_mode}"
+                f"不支持的 SMTP_MODE："
+                f"{smtp_mode}"
             )
 
     except smtplib.SMTPAuthenticationError as exc:
 
         raise RuntimeError(
-            "QQ SMTP 登录失败。"
-            "请检查 QQ 邮箱地址和 SMTP 授权码。"
+            "QQ SMTP 登录失败，"
+            "请检查邮箱和授权码。"
             f" SMTP状态码：{exc.smtp_code}"
         ) from exc
 
     except smtplib.SMTPRecipientsRefused as exc:
 
         raise RuntimeError(
-            "收件邮箱被服务器拒绝，"
-            "请检查 TO_EMAIL。"
-        ) from exc
-
-    except smtplib.SMTPSenderRefused as exc:
-
-        raise RuntimeError(
-            "发件邮箱被服务器拒绝，"
-            "请检查 SMTP_USER。"
+            "收件邮箱被 QQ 邮箱服务器拒绝。"
         ) from exc
 
     except smtplib.SMTPException as exc:
 
         raise RuntimeError(
-            f"SMTP 邮件发送失败："
+            f"SMTP发送失败："
             f"{type(exc).__name__}: {exc}"
         ) from exc
 
 
 # ============================================================
-# 构造正式提醒邮件
+# 邮件正文
 # ============================================================
 
 def build_alert_body(
@@ -708,19 +659,14 @@ def build_alert_body(
             f"发现 {len(new_slots)} 个新的"
             "香港身份证可预约时段。"
         ),
-
         "",
-
         (
             f"监测日期："
             f"{start_date.isoformat()} "
             f"至 {end_date.isoformat()}"
         ),
-
         "",
-
         "【新出现的预约名额】",
-
         "",
     ]
 
@@ -736,15 +682,12 @@ def build_alert_body(
     lines.extend(
         [
             "",
-
             (
                 f"当前监测范围内共有 "
                 f"{len(all_slots)} 个"
                 "可预约时段。"
             ),
-
             "",
-
             (
                 "官方数据更新时间："
                 + (
@@ -753,24 +696,16 @@ def build_alert_body(
                     else "未提供"
                 )
             ),
-
             "",
-
             "请尽快进入香港入境处官方预约系统：",
-
             BOOKING_URL,
-
             "",
-
             "预约配额预览：",
-
             QUOTA_PAGE,
-
             "",
-
             (
-                "说明：本程序只进行预约配额监测"
-                "和邮件提醒，不会自动提交预约。"
+                "本程序只负责公开预约配额监测和提醒，"
+                "不会自动提交预约。"
             ),
         ]
     )
@@ -779,7 +714,7 @@ def build_alert_body(
 
 
 # ============================================================
-# 测试 QQ 邮箱
+# 测试邮件
 # ============================================================
 
 def test_email() -> None:
@@ -793,21 +728,10 @@ def test_email() -> None:
             "【测试成功】"
             "HKID预约监控邮件"
         ),
-
         body=(
             "如果你收到这封邮件，"
-            "说明 QQ 邮箱 SMTP 配置正确。\n\n"
-
-            "HKID 预约监控程序"
-            "已经可以正常发送邮件提醒。\n\n"
-
-            "正式版本会每 5 分钟左右检查一次。\n\n"
-
-            "监测日期截止到："
-            "2026-09-30。\n\n"
-
-            "只有发现新的可预约时段"
-            "才会发送提醒。"
+            "说明 QQ SMTP 配置正常。\n\n"
+            "HKID 预约监控邮件链路正常。"
         ),
     )
 
@@ -817,7 +741,7 @@ def test_email() -> None:
 
 
 # ============================================================
-# 正式监控
+# 正式运行
 # ============================================================
 
 def run(
@@ -828,14 +752,14 @@ def run(
 
     end_date = parse_end_date()
 
-    # --------------------------------------------------------
-    # 截止日期已经过去
-    # --------------------------------------------------------
-
     if today > end_date:
 
         print(
-            "监控截止日期已经过去。"
+            "======================================"
+        )
+
+        print(
+            "HKID 监控截止日期已经过去。"
         )
 
         print(
@@ -843,14 +767,10 @@ def run(
         )
 
         print(
-            "本轮不再查询预约名额。"
+            "本轮不再访问香港入境处。"
         )
 
         return
-
-    # --------------------------------------------------------
-    # 办事处
-    # --------------------------------------------------------
 
     offices = parse_office_filter()
 
@@ -867,11 +787,11 @@ def run(
     )
 
     print(
-        f"香港当前日期：{today.isoformat()}"
+        f"香港日期：{today.isoformat()}"
     )
 
     print(
-        f"监测截止日期：{end_date.isoformat()}"
+        f"截止日期：{end_date.isoformat()}"
     )
 
     print(
@@ -883,18 +803,14 @@ def run(
     )
 
     print(
-        "正在查询香港入境处预约配额..."
+        ""
     )
 
-    # --------------------------------------------------------
-    # 查询官网
-    # --------------------------------------------------------
+    print(
+        "正在读取香港入境处预约配额..."
+    )
 
     payload = fetch_quota()
-
-    # --------------------------------------------------------
-    # 提取今天至 9 月 30 日之间的可预约名额
-    # --------------------------------------------------------
 
     slots = extract_available(
         payload,
@@ -902,29 +818,21 @@ def run(
         offices,
     )
 
-    # --------------------------------------------------------
-    # 读取上一轮状态
-    # --------------------------------------------------------
-
-    previous_keys = (
-        load_previous_keys()
-    )
+    previous_keys = load_previous_keys()
 
     current_keys = {
         slot["key"]
         for slot in slots
     }
 
-    # --------------------------------------------------------
-    # 新出现的名额
-    #
-    # 当前存在
-    # 但上一轮不存在
-    # --------------------------------------------------------
-
     new_keys = (
         current_keys
         - previous_keys
+    )
+
+    disappeared_keys = (
+        previous_keys
+        - current_keys
     )
 
     new_slots = [
@@ -933,10 +841,6 @@ def run(
         if slot["key"] in new_keys
     ]
 
-    # --------------------------------------------------------
-    # 官方数据更新时间
-    # --------------------------------------------------------
-
     source_update_time = str(
         payload.get(
             "lastUpdateTime",
@@ -944,26 +848,32 @@ def run(
         )
     ).strip()
 
-    # --------------------------------------------------------
-    # 日志
-    # --------------------------------------------------------
-
     print(
-        "--------------------------------------"
+        ""
     )
 
     print(
-        f"检查完成："
-        f"{today.isoformat()} "
-        f"至 {end_date.isoformat()}"
+        "======================================"
     )
 
     print(
-        f"当前可预约：{len(slots)} 格"
+        "本轮检查结果"
     )
 
     print(
-        f"新出现名额：{len(new_slots)} 格"
+        "======================================"
+    )
+
+    print(
+        f"当前可预约时段：{len(slots)} 个"
+    )
+
+    print(
+        f"新出现：{len(new_slots)} 个"
+    )
+
+    print(
+        f"已消失：{len(disappeared_keys)} 个"
     )
 
     if source_update_time:
@@ -973,18 +883,64 @@ def run(
             f"{source_update_time}"
         )
 
+    # ========================================================
+    # 每轮打印当前所有实时名额
+    # ========================================================
+
     print(
-        "--------------------------------------"
+        ""
     )
 
-    # --------------------------------------------------------
-    # 如果有新的名额
-    # --------------------------------------------------------
+    print(
+        "======================================"
+    )
+
+    print(
+        "当前实时可预约名额 LIVE"
+    )
+
+    print(
+        "======================================"
+    )
+
+    if slots:
+
+        for slot in slots:
+
+            print(
+                "LIVE | "
+                f'{slot["date"]} | '
+                f'{slot["office"]} | '
+                f'{slot["session"]} | '
+                f'{slot["status"]}'
+            )
+
+    else:
+
+        print(
+            "LIVE | 当前监测范围内没有可预约名额"
+        )
+
+    # ========================================================
+    # 新名额
+    # ========================================================
 
     if new_slots:
 
         print(
-            "发现新的预约名额："
+            ""
+        )
+
+        print(
+            "======================================"
+        )
+
+        print(
+            "发现新的预约名额 NEW"
+        )
+
+        print(
+            "======================================"
         )
 
         for slot in new_slots:
@@ -997,10 +953,6 @@ def run(
                 f'{slot["status"]}'
             )
 
-        # ----------------------------------------------------
-        # DRY RUN
-        # ----------------------------------------------------
-
         if dry_run:
 
             print(
@@ -1011,10 +963,6 @@ def run(
 
             return
 
-        # ----------------------------------------------------
-        # 生成邮件正文
-        # ----------------------------------------------------
-
         body = build_alert_body(
             new_slots=new_slots,
             all_slots=slots,
@@ -1023,18 +971,10 @@ def run(
             source_update_time=source_update_time,
         )
 
-        # ----------------------------------------------------
-        # 找到最早有号日期
-        # ----------------------------------------------------
-
         earliest = min(
             slot["date"]
             for slot in new_slots
         )
-
-        # ----------------------------------------------------
-        # 邮件标题
-        # ----------------------------------------------------
 
         subject = (
             f"【HKID有名额】"
@@ -1042,13 +982,13 @@ def run(
             f"新增 {len(new_slots)} 个时段"
         )
 
-        # ----------------------------------------------------
-        # 发邮件
-        # ----------------------------------------------------
-
         send_email(
             subject=subject,
             body=body,
+        )
+
+        print(
+            ""
         )
 
         print(
@@ -1058,31 +998,29 @@ def run(
     else:
 
         print(
-            "本轮没有发现新的预约名额。"
+            ""
         )
 
         print(
+            "本轮没有发现新的预约名额，"
             "不发送邮件。"
         )
 
-    # --------------------------------------------------------
-    # 保存当前状态
-    # --------------------------------------------------------
+    # ========================================================
+    # 只有名额状态变化时才更新 state.json
+    # ========================================================
 
     if not dry_run:
 
-        save_state(
-            current_keys,
-            source_update_time,
-        )
-
-        print(
-            "state.json 已更新。"
+        save_state_if_changed(
+            previous_keys=previous_keys,
+            current_keys=current_keys,
+            source_update_time=source_update_time,
         )
 
 
 # ============================================================
-# 主程序入口
+# 主程序
 # ============================================================
 
 def main() -> int:
@@ -1096,23 +1034,15 @@ def main() -> int:
 
     parser.add_argument(
         "--test-email",
-
         action="store_true",
-
-        help=(
-            "只测试 QQ 邮箱，"
-            "不查询预约名额"
-        ),
+        help="只发送测试邮件",
     )
 
     parser.add_argument(
         "--dry-run",
-
         action="store_true",
-
         help=(
-            "只查询预约名额，"
-            "不发送邮件，"
+            "只查询，不发邮件，"
             "不修改 state.json"
         ),
     )
