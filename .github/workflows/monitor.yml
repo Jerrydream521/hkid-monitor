@@ -3,7 +3,7 @@ name: HKID Appointment Monitor
 on:
   schedule:
     # 每 5 分钟运行一次
-    - cron: "*/5 * * * *"
+    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"
 
   # 保留手动运行按钮
   workflow_dispatch:
