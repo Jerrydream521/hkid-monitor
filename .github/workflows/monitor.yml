@@ -38,7 +38,7 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
           FROM_NAME: "HKID预约监控"
-        run: python monitor.py
+        run: python monitor.py --test-email
 
       - name: Save monitor state
         shell: bash
