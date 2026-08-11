@@ -196,24 +196,20 @@ def smtp_settings() -> dict:
 def send_email(subject: str, body: str) -> None:
     s = smtp_settings()
 
+    # 清理 GitHub Secret 中可能混入的隐藏换行符
+    def clean_header(value: str) -> str:
+        return str(value).replace("\r", "").replace("\n", "").strip()
+
+    subject = clean_header(subject)
+    from_name = clean_header(s["from_name"])
+    from_email = clean_header(s["user"])
+    to_email = clean_header(s["to"])
+
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = f'{s["from_name"]} <{s["user"]}>'
-    msg["To"] = s["to"]
+    msg["From"] = f"{from_name} <{from_email}>"
+    msg["To"] = to_email
     msg.set_content(body)
-
-    ctx = ssl.create_default_context()
-    if s["mode"] == "ssl":
-        with smtplib.SMTP_SSL(s["host"], s["port"], context=ctx, timeout=25) as smtp:
-            smtp.login(s["user"], s["password"])
-            smtp.send_message(msg)
-    else:
-        with smtplib.SMTP(s["host"], s["port"], timeout=25) as smtp:
-            smtp.ehlo()
-            smtp.starttls(context=ctx)
-            smtp.ehlo()
-            smtp.login(s["user"], s["password"])
-            smtp.send_message(msg)
 
 
 def build_alert_body(
