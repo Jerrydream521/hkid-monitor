@@ -1,11 +1,8 @@
 name: HKID Appointment Monitor
 
 on:
-  schedule:
-    # 每 5 分钟运行一次
-    - cron: "*/5 * * * *"
-
-  # 保留手动运行按钮
+  # 不再使用 GitHub 自己的 schedule
+  # 由 Cloudflare 每 5 分钟调用这个按钮
   workflow_dispatch:
 
 permissions:
@@ -18,44 +15,24 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-
-    # 防止异常情况下长时间占用 Runner
     timeout-minutes: 2
 
     steps:
-
-      # ======================================================
-      # 下载仓库代码
-      # ======================================================
-
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-
-      # ======================================================
-      # Python
-      # ======================================================
 
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      # ======================================================
-      # 正式检测 HKID 预约名额
-      # ======================================================
-
       - name: Check quota
         env:
-
-          # 固定截止到 2026 年 9 月 30 日
           END_DATE: "2026-09-30"
-
-          # 留空 = 全部六个办事处
           OFFICES: ""
 
-          # QQ 邮箱 SMTP
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_MODE: ${{ secrets.SMTP_MODE }}
@@ -65,32 +42,19 @@ jobs:
 
         run: python monitor.py
 
-      # ======================================================
-      # 保存本轮监测状态
-      #
-      # 用于避免同一名额每 5 分钟重复发邮件
-      # ======================================================
-
       - name: Save monitor state
         shell: bash
-
         run: |
-
           if git diff --quiet -- state.json; then
             echo "state.json 没有变化，无需提交。"
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
-
-          git config user.email \
-          "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add state.json
-
-          git commit \
-          -m "chore: update HKID monitor state"
+          git commit -m "chore: update HKID monitor state"
 
           git pull --rebase
-
           git push
