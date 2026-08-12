@@ -1,219 +1,705 @@
-# 香港身份证（HKID）预约名额自动监控
+# HKID Appointment Monitor
 
-这是一个给软件小白使用的简化版小程序。
+香港身份证（HKID）预约名额自动监控工具。
 
-## 它会做什么
+本项目用于定时查询香港入境处公开的身份证预约配额信息，在指定日期范围内发现新的可预约时段时，通过 QQ 邮箱发送提醒。
 
-- 每 10 分钟自动检查一次香港入境处公开的预约配额查询接口。
-- 默认检查 6 个办事处：
-  - 湾仔 RHK
-  - 长沙湾 RKO
-  - 将军澳 RTK
-  - 火炭 FTO
-  - 屯门 TMO
-  - 元朗 YLO
-- 只看“今天起未来 30 天”。
-- `quota-g`（有名额）和 `quota-y`（少量名额）都视为可预约。
-- 有新的可预约格子时发送邮件。
-- 同一个格子持续开放时不会每 10 分钟重复发邮件。
-- 如果某个格子先满了、之后又重新开放，会再次提醒。
-- **不会自动预约，不会填写个人资料，不会绕过验证码。**
+> 本项目仅用于公开预约配额查询和提醒。
+> 不自动预约、不提交个人身份资料、不绕过验证码，也不会为用户锁定预约名额。
 
 ---
 
-# 推荐使用方式：GitHub Actions
-
-优点：你的电脑关机也能继续监控。
-
-## 第 1 步：准备 GitHub 账号
-
-打开 GitHub 并注册/登录。
-
-## 第 2 步：新建仓库
-
-1. GitHub 右上角点 `+`
-2. 选择 `New repository`
-3. Repository name 可填：`hkid-monitor`
-4. 建议选择 `Private`
-5. 点击 `Create repository`
-
-## 第 3 步：把这些文件上传到仓库
-
-解压本压缩包后，把里面的文件和文件夹上传到仓库根目录。
-
-最终仓库里应看到：
+## 1. 当前运行架构
 
 ```text
-.github/
-  workflows/
-    monitor.yml
-.gitignore
+Cloudflare Cron Trigger（每 1 分钟）
+        ↓
+Cloudflare Worker
+        ↓
+GitHub REST API
+        ↓
+workflow_dispatch
+        ↓
+GitHub Actions
+        ↓
 monitor.py
-state.json
+        ↓
+香港入境处预约配额查询接口
+        ↓
+筛选指定日期范围和办事处
+        ↓
+发现新名额
+        ↓
+QQ 邮箱提醒
+```
+
+当前不再使用 GitHub Actions 自带的 `schedule` 定时器。Cloudflare 负责定时触发，GitHub 只负责执行监控程序。
+
+---
+
+## 2. 当前监控配置
+
+- 检查频率：每 1 分钟一次
+- 开始日期：当天
+- 截止日期：2026-09-30
+- 监控办事处：全部 6 个
+- 提醒方式：QQ 邮箱
+- 只有新名额才发送提醒
+- 已经提醒过且持续存在的名额不会重复发送
+- 名额消失后重新出现，会再次发送提醒
+
+---
+
+## 3. 监控的办事处
+
+| 代码 | 办事处 |
+|---|---|
+| RHK | 湾仔 |
+| RKO | 长沙湾 |
+| RTK | 将军澳 |
+| FTO | 火炭 |
+| TMO | 屯门 |
+| YLO | 元朗 |
+
+如果 `OFFICES` 留空，则全部检查。
+
+---
+
+## 4. 名额状态识别规则
+
+程序当前把以下两种状态视为可预约：
+
+```text
+quota-g = 有名额
+quota-y = 少量名额
+```
+
+其他状态不会触发邮件。
+
+---
+
+## 5. 目录结构
+
+```text
+hkid-monitor/
+│
+├─ .github/
+│  └─ workflows/
+│     └─ monitor.yml
+│
+├─ monitor.py
+├─ state.json
+└─ README.md
+```
+
+---
+
+## 6. monitor.py 的作用
+
+`monitor.py` 是核心监控程序，主要负责：
+
+1. 请求香港入境处预约配额数据
+2. 获取官方数据更新时间
+3. 筛选当天至 2026-09-30 的预约日期
+4. 筛选 6 个办事处
+5. 判断当前实时可预约时段
+6. 与上一轮状态比较
+7. 找出新出现的名额
+8. 发现新名额时发送 QQ 邮件
+9. 在 GitHub Actions 日志中打印实时名额
+10. 只有预约状态发生变化时才更新 `state.json`
+
+---
+
+## 7. state.json 的作用
+
+`state.json` 用于记录上一轮已经存在的预约名额，防止重复提醒。
+
+示例：
+
+```text
+10:00
+火炭 8月20日 有名额
+→ 发送邮件
+
+10:01
+火炭 8月20日 仍然有名额
+→ 不重复发送
+
+10:05
+该名额消失
+→ 更新状态
+
+10:20
+该名额重新出现
+→ 再次发送邮件
+```
+
+只有预约状态发生变化时才更新 `state.json`，因此不会因为每分钟运行一次而产生大量无意义的 Git commit。
+
+---
+
+## 8. GitHub Actions 配置
+
+工作流文件位置：
+
+```text
+.github/workflows/monitor.yml
+```
+
+当前只保留：
+
+```yaml
+on:
+  workflow_dispatch:
+```
+
+不使用 `schedule:`，因为定时任务已经交给 Cloudflare。
+
+---
+
+## 9. GitHub Repository Secrets
+
+路径：
+
+```text
+GitHub
+→ hkid-monitor
+→ Settings
+→ Secrets and variables
+→ Actions
+```
+
+需要配置：
+
+```text
+SMTP_HOST
+SMTP_PORT
+SMTP_MODE
+SMTP_USER
+SMTP_PASS
+TO_EMAIL
+```
+
+QQ 邮箱推荐配置：
+
+```text
+SMTP_HOST = smtp.qq.com
+SMTP_PORT = 465
+SMTP_MODE = ssl
+SMTP_USER = 你的完整QQ邮箱
+SMTP_PASS = QQ邮箱SMTP授权码
+TO_EMAIL = 接收提醒的邮箱
+```
+
+推荐 `SMTP_USER = TO_EMAIL`，即 QQ 邮箱给自己发送提醒。
+
+`SMTP_PASS` 必须填写 QQ 邮箱生成的 SMTP 授权码，不是 QQ 登录密码。
+
+---
+
+## 10. Cloudflare Worker
+
+Cloudflare Worker 当前名称：
+
+```text
+hkid-github-trigger
+```
+
+它只负责：
+
+```text
+Cloudflare Cron
+→ 调用 GitHub API
+→ 触发 monitor.yml
+```
+
+Cloudflare Worker 本身不查询 HKID、不发送 QQ 邮件、不保存预约状态。
+
+---
+
+## 11. Cloudflare Secret
+
+Cloudflare Worker 中需要保存：
+
+```text
+GITHUB_TOKEN
+```
+
+位置：
+
+```text
+Cloudflare
+→ Compute
+→ Workers & Pages
+→ hkid-github-trigger
+→ Settings
+→ Variables and Secrets
+```
+
+类型必须选择 `Secret`。
+
+GitHub Fine-grained Token 建议仅授权：
+
+```text
+Repository: hkid-monitor
+Actions: Read and write
+Metadata: Read-only
+```
+
+---
+
+## 12. Cloudflare Cron Trigger
+
+当前 Cron：
+
+```text
+* * * * *
+```
+
+表示每 1 分钟执行一次。
+
+---
+
+## 13. Cloudflare 日志怎么看
+
+进入：
+
+```text
+Cloudflare
+→ Observability
+```
+
+筛选 Service：
+
+```text
+hkid-github-trigger
+```
+
+正常情况下，每分钟应看到类似：
+
+```text
+Cron triggered: 2026-08-12T02:30:02...
+GitHub workflow dispatch: 200 ...
+```
+
+其中：
+
+- `Cron triggered`：Cloudflare 定时器正常
+- `GitHub workflow dispatch: 200`：GitHub API 调用成功
+
+---
+
+## 14. GitHub Actions 日志怎么看
+
+进入：
+
+```text
+GitHub
+→ hkid-monitor
+→ Actions
+→ HKID Appointment Monitor
+→ 最新一次运行
+→ check
+→ Check quota
+```
+
+正常日志示例：
+
+```text
+======================================
+HKID 预约名额自动监控
+======================================
+
+香港日期：2026-08-12
+截止日期：2026-09-30
+
+正在读取香港入境处预约配额...
+
+======================================
+本轮检查结果
+======================================
+
+当前可预约时段：0 个
+新出现：0 个
+已消失：0 个
+官方数据更新时间：08/12/2026 10:30:24
+
+======================================
+当前实时可预约名额 LIVE
+======================================
+
+LIVE | 当前监测范围内没有可预约名额
+```
+
+---
+
+## 15. LIVE / NEW / 已消失
+
+### LIVE
+
+表示这一轮查询时，官网当前真实存在的可预约时段。
+
+```text
+LIVE | 2026-08-20 | 火炭 | 一般服务时段 | 少量名额
+```
+
+### NEW
+
+表示上一轮不存在、本轮首次出现。
+
+```text
+NEW | 2026-08-20 | 火炭 | 一般服务时段 | 少量名额
+```
+
+出现 `NEW` 后，程序会发送 QQ 邮件。
+
+### 已消失
+
+表示上一轮存在、本轮已经不存在。
+
+```text
+已消失：4 个
+```
+
+---
+
+## 16. QQ 邮件提醒
+
+检测到新名额后，邮件标题类似：
+
+```text
+【HKID有名额】最早 2026-08-20，新增 1 个时段
+```
+
+正文会包含：
+
+- 日期
+- 办事处
+- 服务时段
+- 名额状态
+- 当前监控范围
+- 官方数据更新时间
+- 香港入境处预约入口
+
+邮件只在发现 `NEW` 名额时发送。
+
+---
+
+## 17. 如何确认系统真的有效
+
+完整链路需要同时满足以下条件：
+
+### 1）Cloudflare 正常
+
+```text
+Cron triggered
+GitHub workflow dispatch: 200
+```
+
+### 2）GitHub Action 正常
+
+GitHub Actions 显示 `Success`。
+
+### 3）入境处数据正常
+
+GitHub 日志出现：
+
+```text
+官方数据更新时间：...
+```
+
+说明程序成功获得了入境处返回的数据。
+
+### 4）实时名额识别
+
+如果官网存在名额，GitHub 日志应出现：
+
+```text
+LIVE | 日期 | 办事处 | 时段 | 状态
+```
+
+### 5）新名额邮件提醒
+
+首次检测到新名额时：
+
+```text
+NEW | ...
+预约提醒邮件已发送。
+```
+
+同时 QQ 邮箱应收到正式提醒。
+
+---
+
+## 18. 常见问题排查
+
+### GITHUB_TOKEN secret is missing
+
+检查：
+
+```text
+Settings
+→ Variables and Secrets
+→ GITHUB_TOKEN
+```
+
+确认：
+
+```text
+Type = Secret
+Environment = Production
+```
+
+### GitHub workflow dispatch: 401
+
+一般表示 Token 无效、过期或已撤销。
+
+### GitHub workflow dispatch: 403
+
+一般表示 Token 权限不足。确认：
+
+```text
+Actions = Read and write
+```
+
+### GitHub workflow dispatch: 404
+
+检查：
+
+```text
+GITHUB_OWNER
+GITHUB_REPO
+WORKFLOW_FILE
+GITHUB_BRANCH
+```
+
+当前应对应：
+
+```text
+Owner: Jerrydream521
+Repo: hkid-monitor
+Workflow: monitor.yml
+Branch: main
+```
+
+### QQ SMTP 登录失败
+
+检查：
+
+```text
+SMTP_HOST = smtp.qq.com
+SMTP_PORT = 465
+SMTP_MODE = ssl
+SMTP_USER = 完整QQ邮箱
+SMTP_PASS = QQ邮箱SMTP授权码
+```
+
+### 收不到邮件
+
+先检查 GitHub 日志有没有 `NEW`。如果只有 `LIVE` 没有 `NEW`，说明这个名额已经提醒过，不会重复发送。
+
+---
+
+## 19. 官方数据更新时间
+
+日志中的：
+
+```text
+官方数据更新时间：08/12/2026 09:53:24
+```
+
+是香港入境处数据源返回的更新时间，不是 Cloudflare 运行时间、GitHub Action 运行时间或邮件发送时间。
+
+例如：
+
+```text
+程序查询时间：10:00
+官方数据更新时间：09:53:24
+```
+
+表示程序在 10:00 查询时，入境处最新提供的是 09:53:24 这一版配额数据。
+
+---
+
+## 20. 关于预约网站排队
+
+监控程序发现名额并不等于已经锁定名额。
+
+实际流程：
+
+```text
+发现名额
+→ 邮件提醒
+→ 用户进入香港入境处预约系统
+→ 排队
+→ 进入预约页面
+→ 自行完成预约
+```
+
+排队期间名额仍可能被其他人预约。
+
+---
+
+## 21. 安全和隐私
+
+以下信息绝对不要写进公开 GitHub 文件：
+
+```text
+QQ邮箱SMTP授权码
+GitHub Personal Access Token
+密码
+香港身份证号码
+护照号码
+手机号
+其他个人敏感信息
+```
+
+GitHub SMTP 信息应放在 `GitHub Repository Secrets`。
+
+GitHub PAT 应放在 `Cloudflare Worker Secret`。
+
+不要直接写在：
+
+```text
+monitor.py
+monitor.yml
 README.md
-```
-
-最重要的是 `.github/workflows/monitor.yml` 必须保留这个路径。
-
-## 第 4 步：设置邮件参数
-
-进入你的 GitHub 仓库：
-
-`Settings` → `Secrets and variables` → `Actions` → `New repository secret`
-
-依次新建下面 6 个 Secret：
-
-### 必填
-
-`SMTP_HOST`
-- 发件邮箱的 SMTP 服务器地址
-- 例如 QQ 邮箱常见写法：`smtp.qq.com`
-
-`SMTP_PORT`
-- SSL 常用：`465`
-
-`SMTP_MODE`
-- SSL 填：`ssl`
-- 如果你的邮箱要求 STARTTLS，则填：`starttls`
-
-`SMTP_USER`
-- 发件邮箱完整地址
-- 例如：`yourname@qq.com`
-
-`SMTP_PASS`
-- **这里不要填普通登录密码**
-- 填邮箱服务商提供的 SMTP 授权码 / App Password
-
-`TO_EMAIL`
-- 接收提醒的邮箱
-- 可以和发件邮箱相同，也可以不同
-
-> 不同邮箱服务商的 SMTP 地址、端口和授权方式可能不同，
-> 请以你所使用邮箱的官方帮助文档为准。
-
-## 第 5 步：先测试
-
-进入仓库：
-
-`Actions` → 左侧点 `HKID Appointment Monitor` → `Run workflow`
-
-运行后，点进去看日志。
-
-第一次运行如果未来 30 天已经有可预约格子，会直接给你发提醒邮件。
-
-## 第 6 步：确认自动运行
-
-`.github/workflows/monitor.yml` 已设置：
-
-```yaml
-- cron: "*/10 * * * *"
-```
-
-即大约每 10 分钟检查一次。
-
-GitHub 的定时任务可能偶尔有排队延迟，所以它不是“精确到秒”的监控。
-
----
-
-# 如何只监控指定办事处
-
-打开：
-
-`.github/workflows/monitor.yml`
-
-找到：
-
-```yaml
-OFFICES: ""
-```
-
-留空表示全部 6 个办事处。
-
-例如只看湾仔 + 长沙湾：
-
-```yaml
-OFFICES: "RHK,RKO"
-```
-
-可用代码：
-
-- `RHK` 湾仔
-- `RKO` 长沙湾
-- `RTK` 将军澳
-- `FTO` 火炭
-- `TMO` 屯门
-- `YLO` 元朗
-
----
-
-# 如何把“一个月”改成别的天数
-
-打开：
-
-`.github/workflows/monitor.yml`
-
-找到：
-
-```yaml
-WINDOW_DAYS: "30"
-```
-
-例如想监测未来 21 天：
-
-```yaml
-WINDOW_DAYS: "21"
+Cloudflare Worker源码
 ```
 
 ---
 
-# 如何改检查频率
+## 22. 停止日期
 
-打开：
+当前监控截止日期：
 
-`.github/workflows/monitor.yml`
-
-当前是：
-
-```yaml
-- cron: "*/10 * * * *"
+```text
+2026-09-30
 ```
 
-如果改成每 5 分钟：
+`monitor.py` 会忽略 2026-10-01 及以后的预约日期。
 
-```yaml
-- cron: "*/5 * * * *"
-```
-
-不建议做秒级高频请求。
+Cloudflare Worker 也应在香港时间 2026-09-30 结束后停止继续触发 GitHub。
 
 ---
 
-# 测试邮件功能
+## 23. 修改监控截止日期
 
-如果你在自己电脑上装有 Python，可以运行：
+GitHub：
 
-```bash
-python monitor.py --test-email
+```text
+.github/workflows/monitor.yml
 ```
 
-但本地运行时，需要先把 SMTP 配置写成环境变量。
+修改：
 
-对软件小白来说，直接通过 GitHub Actions 测试更简单。
+```yaml
+END_DATE: "2026-09-30"
+```
+
+如果修改截止日期，也建议同步修改 Cloudflare Worker 中的停止时间。
 
 ---
 
-# 重要说明
+## 24. 手动测试
 
-1. 本程序只读取公开预约配额，不代抢、不代约。
-2. 收到邮件后，仍需由你本人进入香港入境处官方预约系统确认并完成预约。
-3. 香港入境处页面或接口未来可能调整；如果接口字段改变，需要同步修改程序。
-4. 请不要把 SMTP 授权码直接写进 `monitor.py`、`README.md` 或公开仓库。
-5. 建议把 GitHub 仓库设为 Private。
+GitHub 仍保留 `Run workflow`，可以手动测试：
 
-官方预约入口：
+```text
+GitHub
+→ Actions
+→ HKID Appointment Monitor
+→ Run workflow
+```
 
-`https://www.gov.hk/icbooking`
+手动运行不会影响 Cloudflare 的自动触发。
 
-配额预览页：
+---
 
-`https://eservices.es2.immd.gov.hk/es/quota-enquiry-client/?l=zh-CN&appId=579`
+## 25. 项目原则
+
+本项目只负责：
+
+```text
+查询
+→ 判断
+→ 提醒
+```
+
+不会执行：
+
+```text
+自动抢号
+自动提交预约
+绕过排队
+绕过验证码
+批量占号
+提交个人身份信息
+```
+
+---
+
+## 26. 当前最终配置摘要
+
+```text
+Cloudflare Worker:
+hkid-github-trigger
+
+Cloudflare Cron:
+* * * * *
+= 每 1 分钟
+
+GitHub Repository:
+Jerrydream521/hkid-monitor
+
+GitHub Workflow:
+.github/workflows/monitor.yml
+
+Workflow Trigger:
+workflow_dispatch
+
+Python:
+monitor.py
+
+监控日期:
+当天 → 2026-09-30
+
+办事处:
+湾仔
+长沙湾
+将军澳
+火炭
+屯门
+元朗
+
+提醒:
+QQ SMTP
+
+状态日志:
+LIVE
+NEW
+已消失
+
+预约状态变化:
+才更新 state.json
+
+新名额:
+才发送邮件
+```
+
+---
+
+## 27. 使用提醒
+
+即使程序每分钟检查一次，也无法保证获得预约名额。
+
+原因包括：
+
+- 官方数据本身可能不是实时逐秒更新
+- 临时取消号可能很快被其他用户预约
+- 正式预约网站可能存在排队
+- 邮件推送存在少量延迟
+- GitHub Action 启动也可能存在短暂排队
+
+本项目的作用是尽可能减少人工反复查询，并在公开预约配额出现变化时尽快提醒。
