@@ -1,11 +1,7 @@
 {
   "available_keys": [
-    "FTO|2026-09-29|R",
-    "FTO|2026-09-30|R",
-    "RTK|2026-09-30|R",
-    "YLO|2026-09-29|R",
-    "YLO|2026-09-30|R"
+    "RHK|2026-08-24|R"
   ],
-  "source_update_time": "08/15/2026 14:18:18",
-  "state_changed_at_hkt": "2026-08-15T14:18:44+08:00"
+  "source_update_time": "08/15/2026 14:32:41",
+  "state_changed_at_hkt": "2026-08-15T14:32:47+08:00"
 }
