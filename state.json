@@ -1,5 +1,7 @@
 {
-  "available_keys": [],
-  "source_update_time": "08/16/2026 12:35:06",
-  "state_changed_at_hkt": "2026-08-16T12:35:42+08:00"
+  "available_keys": [
+    "TMO|2026-08-21|R"
+  ],
+  "source_update_time": "08/17/2026 09:31:15",
+  "state_changed_at_hkt": "2026-08-17T09:31:45+08:00"
 }
